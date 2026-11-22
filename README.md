@@ -26,7 +26,8 @@ A production-ready **Retrieval-Augmented Generation (RAG)** system powered by **
 
 ```bash
 # Clone the repository
-cd C:\Users\91767\Desktop\rag_projects\splade_rag_project
+https://github.com/Rajagopalhertzian/splade_rag_project.git
+cd splade_rag_project
 
 # Install dependencies
 pip install -r requirements.txt
