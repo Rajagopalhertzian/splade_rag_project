@@ -350,7 +350,3 @@ MIT License - see [LICENSE](LICENSE) for details.
 - The open-source IR community for benchmarks and datasets
 
 ---
-
-**Built with ❤️ for the RAG and IR community**
-
-*Showcase your SPLADE skills with this production-ready implementation!*
