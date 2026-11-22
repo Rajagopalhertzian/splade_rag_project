@@ -1,0 +1,52 @@
+# SPLADE-RAG Configuration
+# Copy to config.local.yaml and modify for your environment
+
+# Model Settings
+model:
+  splade_model: "naver/splade-max"       # Options: naver/splade-max, naver/splade-distil, naver/splade-cocondenser
+  splade_tokenizer: "bert-base-uncased"
+  llm_model: "microsoft/Phi-3-mini-4k-instruct"  # Or any compatible HF model
+  device: "cuda"                          # "cuda" or "cpu"
+
+# Retrieval Settings
+retrieval:
+  top_k_candidates: 100                   # First-stage retrieval
+  final_top_k: 5                          # Final results after re-ranking
+  use_hybrid: false                       # Enable hybrid (sparse + dense)
+  dense_model: null                       # Dense model for hybrid (e.g., "sentence-transformers/all-MiniLM-L6-v2")
+  fusion_method: "rrf"                    # "rrf", "weighted", "linear", "concat"
+
+# Re-ranking
+reranker:
+  enabled: true
+  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Chunking
+chunking:
+  chunk_size: 200                         # Tokens per chunk
+  chunk_overlap: 50                       # Overlap tokens
+  min_chunk_size: 50                      # Minimum chunk size
+
+# Generation
+generation:
+  max_new_tokens: 512
+  temperature: 0.3
+  top_p: 0.9
+
+# Index Settings
+index:
+  type: "memory"                          # "memory" or "elasticsearch"
+  path: "./data/splade_index"             # For memory index
+  elasticsearch:
+    url: "http://localhost:9200"
+    index_name: "splade_rag"
+
+# Data Settings
+data:
+  documents_dir: "./data/documents"       # Directory with documents to index
+  supported_extensions: [".txt", ".md", ".json"]
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

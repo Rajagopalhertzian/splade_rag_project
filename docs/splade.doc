@@ -1,0 +1,1073 @@
+# SPLADE: Sparse Lexical and Expansion Model for Information Retrieval
+## Comprehensive Technical Documentation for RAG Systems
+
+---
+
+## Table of Contents
+1. [Introduction](#introduction)
+2. [Theoretical Foundations](#theoretical-foundations)
+3. [Architecture](#architecture)
+4. [Training Objectives](#training-objectives)
+5. [SPLADE Variants](#splade-variants)
+6. [Implementation Details](#implementation-details)
+7. [Integration with RAG Systems](#integration-with-rag-systems)
+8. [Performance Benchmarks](#performance-benchmarks)
+9. [Best Practices](#best-practices)
+10. [Advanced Topics](#advanced-topics)
+11. [References](#references)
+
+---
+
+## 1. Introduction
+
+### 1.1 What is SPLADE?
+
+**SPLADE (Sparse Lexical and Expansion Model)** is a family of sparse neural retrieval models that learn sparse vocabulary-based representations for both queries and documents. Unlike dense retrieval models (e.g., DPR, ANCE) that produce dense vectors, SPLADE produces **sparse high-dimensional vectors** where each dimension corresponds to a token in the vocabulary.
+
+### 1.2 Key Innovations
+
+| Innovation | Description |
+|------------|-------------|
+| **Learned Sparsity** | Model learns which vocabulary terms are important, rather than using fixed TF-IDF |
+| **Term Expansion** | Automatically expands queries/documents with relevant terms not present in original text |
+| **Interpretability** | Non-zero weights directly correspond to vocabulary terms - human readable |
+| **Efficiency** | Sparse vectors enable inverted index lookup - sub-linear retrieval time |
+| **Compatibility** | Works with existing search infrastructure (Elasticsearch, Lucene, etc.) |
+
+### 1.3 Why SPLADE for RAG?
+
+```
+Traditional RAG Pipeline:
+Query → Dense Embedding → Vector Search (ANN) → Top-k Documents → LLM
+
+SPLADE RAG Pipeline:
+Query → Sparse Embedding → Inverted Index Lookup → Top-k Documents → LLM
+```
+
+**Advantages for RAG:**
+- **Exact matching** for keywords (no semantic drift)
+- **Controlled expansion** - only adds relevant terms
+- **Faster indexing** - no need for HNSW/IVF index building
+- **Lower memory** - sparse vectors are naturally compressed
+- **Better OOV handling** - expands to known vocabulary terms
+
+---
+
+## 2. Theoretical Foundations
+
+### 2.1 From TF-IDF to Learned Sparse Retrieval
+
+**Traditional TF-IDF:**
+```
+score(q, d) = Σ_{t∈q} tf(t,d) × idf(t)
+```
+
+**SPLADE learns:**
+- **Term importance weights** (replacing tf)
+- **Query/document expansion** (adding relevant terms)
+
+### 2.2 Formal Definition
+
+Given a vocabulary V of size |V|, SPLADE maps text x to a sparse vector **w** ∈ ℝ^|V|:
+
+```
+w = SPLADE(x; θ) = ReLU(MLM_Head(BERT(x; θ)))
+```
+
+Where:
+- **BERT(x; θ)** produces contextualized token embeddings
+- **MLM_Head** projects to vocabulary logits
+- **ReLU** ensures non-negativity (required for inverted index)
+- **Sparsity regularization** forces most weights to zero
+
+### 2.3 Sparsity Regularization: FLOPS
+
+**FLOPS (FLOPS Regularization)** controls the number of non-zero dimensions:
+
+```
+L_sparsity = λ × Σ_i log(1 + Σ_j w_{i,j}^2 / ε)
+```
+
+Or the simpler **FLOPS** regularization:
+```
+L_FLOPS = λ × (Σ_j w_j)^2  (for query)
+L_FLOPS = λ × Σ_j w_j^2    (for document)
+```
+
+This encourages the model to use **fewer but more important terms**.
+
+### 2.4 Distillation from Dense Models
+
+SPLADE can be trained via **knowledge distillation** from a dense teacher (e.g., ColBERT, DPR):
+
+```
+L_distill = KL(softmax(s_dense/τ) || softmax(s_sparse/τ))
+```
+
+Where s_dense and s_sparse are similarity scores.
+
+---
+
+## 3. Architecture
+
+### 3.1 Core Architecture: SPLADE v2 (SPLADE-max)
+
+```
+Input Text
+    │
+    ▼
+┌─────────────────────┐
+│   BERT Backbone     │  (e.g., bert-base-uncased, distilbert)
+│   (12 layers,       │
+│    768 hidden)      │
+└─────────┬───────────┘
+          │ [CLS] or token-level
+          ▼
+┌─────────────────────┐
+│   MLM Head          │  Projects to vocab_size (30,522 for BERT)
+│   (Linear + Bias)   │
+└─────────┬───────────┘
+          │ logits per token
+          ▼
+┌─────────────────────┐
+│   Activation        │  ReLU(logits) for non-negativity
+│   (ReLU / Log(1+exp)│
+└─────────┬───────────┘
+          │ sparse weights
+          ▼
+┌─────────────────────┐
+│   Aggregation       │  max-pooling (SPLADE-max) or sum-pooling
+│   (max/sum over     │
+│    sequence)        │
+└─────────┬───────────┘
+          │
+          ▼
+    Sparse Vector w ∈ ℝ^|V|
+```
+
+### 3.2 Aggregation Strategies
+
+| Strategy | Formula | Use Case |
+|----------|---------|----------|
+| **max-pooling** | w_j = max_i ReLU(logits_{i,j}) | SPLADE-max (default), better for queries |
+| **sum-pooling** | w_j = Σ_i ReLU(logits_{i,j}) | Document encoding, preserves frequency |
+| **log(1+sum)** | w_j = log(1 + Σ_i exp(logits_{i,j})) | Smoother gradients |
+
+### 3.3 Vocabulary Mapping
+
+```
+BERT Vocabulary (30,522 tokens)
+    │
+    ├── [PAD] = 0
+    ├── [UNK] = 100
+    ├── [CLS] = 101
+    ├── [SEP] = 102
+    ├── [MASK] = 103
+    ├── English words (lowercased, WordPiece)
+    └── Special tokens
+
+Sparse Vector: {token_id: weight, ...}  // Only non-zero entries stored
+```
+
+### 3.4 Computational Complexity
+
+| Operation | Dense (768-dim) | SPLADE (30k vocab, ~100 non-zero) |
+|-----------|-----------------|-----------------------------------|
+| **Storage/Vector** | 3 KB (float32) | ~0.4 KB (sparse) |
+| **Dot Product** | O(768) | O(100) |
+| **Index Build** | O(n × 768 × log n) | O(n × 100) |
+| **Query Time** | O(log n) with HNSW | O(k) with inverted index |
+
+---
+
+## 4. Training Objectives
+
+### 4.1 Contrastive Learning (Bi-encoder)
+
+```
+L_contrastive = -log( exp(s(q, d⁺)/τ) / Σ_{d∈{d⁺,d⁻}} exp(s(q, d)/τ) )
+```
+
+Where:
+- s(q, d) = ⟨w_q, w_d⟩ = Σ_j w_{q,j} × w_{d,j}
+- d⁺ = positive document
+- d⁻ = negative documents
+- τ = temperature (typically 1.0)
+
+### 4.2 Sparsity Loss
+
+**FLOPS Regularization (SPLADE v2):**
+```
+L_FLOPS(q) = λ_q × (Σ_j w_{q,j})^2
+L_FLOPS(d) = λ_d × Σ_j w_{d,j}^2
+```
+
+**L1 Regularization (Alternative):**
+```
+L_L1 = λ × Σ_j |w_j|
+```
+
+### 4.3 Combined Loss
+
+```
+L_total = L_contrastive + L_FLOPS(q) + L_FLOPS(d) + L_distill (optional)
+```
+
+### 4.4 Training Strategies
+
+| Strategy | Description | When to Use |
+|----------|-------------|-------------|
+| **From Scratch** | Train BERT + MLM head from random init | Large domain-specific corpus |
+| **Fine-tuning** | Start from pre-trained BERT + MLM | General domain, limited data |
+| **Distillation** | Distill from ColBERT/DPR teacher | Best quality, need teacher model |
+| **Co-training** | Joint train sparse + dense | Hybrid retrieval systems |
+
+### 4.5 Hard Negative Mining
+
+Critical for performance:
+1. **BM25 negatives** - Top BM25 results that aren't relevant
+2. **Dense negatives** - Top dense retrieval results that aren't relevant
+3. **In-batch negatives** - Other queries' positives in same batch
+4. **Iterative mining** - Re-mine negatives every few epochs
+
+---
+
+## 5. SPLADE Variants
+
+### 5.1 SPLADE v1 (Original)
+- **Paper**: "SPLADE: Sparse Lexical and Expansion Model for First Stage Ranking" (Formal et al., SIGIR 2021)
+- Sum-pooling aggregation
+- FLOPS regularization
+- Trained with distillation from ColBERT
+
+### 5.2 SPLADE v2 (SPLADE-max) ⭐ **Recommended**
+- **Paper**: "SPLADE v2: Sparse Lexical and Expansion Model for Information Retrieval" (Formal et al., 2021)
+- **Max-pooling** aggregation (better for queries)
+- Improved FLOPS regularization
+- Better distillation techniques
+- **State-of-the-art** among sparse models
+
+### 5.3 SPLADE-distil
+- DistilBERT backbone (6 layers, 768 hidden)
+- ~2x faster, ~40% smaller
+- Minimal quality loss (~1-2% nDCG)
+
+### 5.4 SPLADE-Ensemble
+- Multiple SPLADE models with different checkpoints
+- Score fusion (RRF, weighted sum)
+- Best quality, higher latency
+
+### 5.5 Domain-Adapted Variants
+| Variant | Domain | Base Model |
+|---------|--------|------------|
+| **SPLADE-COCO** | Image captioning | BERT-base |
+| **SPLADE-Medical** | Biomedical | PubMedBERT |
+| **SPLADE-Legal** | Legal documents | Legal-BERT |
+| **SPLADE-Code** | Source code | CodeBERT |
+
+### 5.6 Multilingual SPLADE
+- **mSPLADE**: mBERT or XLM-R backbone
+- Supports 100+ languages
+- Shared vocabulary across languages
+
+---
+
+## 6. Implementation Details
+
+### 6.1 PyTorch Implementation
+
+```python
+import torch
+import torch.nn as nn
+from transformers import BertModel, BertTokenizer
+
+class SPLADE(nn.Module):
+    def __init__(self, model_name='bert-base-uncased',
+                 aggregation='max',  # 'max' or 'sum'
+                 vocab_size=30522):
+        super().__init__()
+        self.bert = BertModel.from_pretrained(model_name)
+        self.mlm_head = nn.Linear(self.bert.config.hidden_size, vocab_size)
+        self.aggregation = aggregation
+
+    def forward(self, input_ids, attention_mask):
+        # BERT encoding
+        outputs = self.bert(input_ids=input_ids,
+                           attention_mask=attention_mask)
+        # Token-level representations [batch, seq_len, hidden]
+        token_embeds = outputs.last_hidden_state
+
+        # MLM head → vocab logits [batch, seq_len, vocab]
+        logits = self.mlm_head(token_embeds)
+
+        # ReLU for non-negativity
+        weights = torch.relu(logits)
+
+        # Aggregation over sequence dimension
+        if self.aggregation == 'max':
+            # Max pooling: [batch, vocab]
+            sparse_vec, _ = weights.max(dim=1)
+        else:
+            # Sum pooling
+            sparse_vec = weights.sum(dim=1)
+
+        return sparse_vec
+
+    def get_sparse_representation(self, sparse_vec, top_k=None):
+        """Convert dense sparse vector to dict {token_id: weight}"""
+        batch_size = sparse_vec.shape[0]
+        results = []
+
+        for i in range(batch_size):
+            vec = sparse_vec[i]
+            # Get non-zero indices and values
+            non_zero = vec.nonzero().squeeze(-1)
+            values = vec[non_zero]
+
+            if top_k and len(non_zero) > top_k:
+                # Keep top-k weights
+                top_values, top_idx = values.topk(top_k)
+                non_zero = non_zero[top_idx]
+                values = top_values
+
+            results.append({
+                idx.item(): val.item()
+                for idx, val in zip(non_zero, values)
+            })
+        return results
+```
+
+### 6.2 Inference Pipeline
+
+```python
+class SPLADEEncoder:
+    def __init__(self, model_path, tokenizer_name='bert-base-uncased',
+                 device='cuda', max_length=256):
+        self.tokenizer = BertTokenizer.from_pretrained(tokenizer_name)
+        self.model = SPLADE().to(device)
+        self.model.load_state_dict(torch.load(model_path))
+        self.model.eval()
+        self.device = device
+        self.max_length = max_length
+
+    @torch.no_grad()
+    def encode_queries(self, queries: List[str],
+                       batch_size=32, top_k=100) -> List[Dict]:
+        """Encode queries to sparse vectors"""
+        all_sparse = []
+        for i in range(0, len(queries), batch_size):
+            batch = queries[i:i+batch_size]
+            inputs = self.tokenizer(batch, padding=True, truncation=True,
+                                   max_length=self.max_length,
+                                   return_tensors='pt').to(self.device)
+            sparse_vecs = self.model(inputs['input_ids'],
+                                     inputs['attention_mask'])
+            sparse_dicts = self.model.get_sparse_representation(
+                sparse_vecs, top_k=top_k)
+            all_sparse.extend(sparse_dicts)
+        return all_sparse
+
+    @torch.no_grad()
+    def encode_documents(self, docs: List[str],
+                         batch_size=16, top_k=300) -> List[Dict]:
+        """Encode documents to sparse vectors (larger top_k for docs)"""
+        return self.encode_queries(docs, batch_size, top_k)
+```
+
+### 6.3 Inverted Index Construction
+
+```python
+from collections import defaultdict
+import json
+
+class SPLADEIndex:
+    def __init__(self):
+        # Inverted index: token_id -> List[(doc_id, weight)]
+        self.index = defaultdict(list)
+        self.doc_metadata = {}
+
+    def add_documents(self, doc_ids: List[str],
+                      sparse_vecs: List[Dict[int, float]],
+                      metadata: List[Dict] = None):
+        for doc_id, vec, meta in zip(doc_ids, sparse_vecs,
+                                      metadata or [{}]*len(doc_ids)):
+            self.doc_metadata[doc_id] = meta
+            for token_id, weight in vec.items():
+                self.index[token_id].append((doc_id, weight))
+
+    def save(self, path: str):
+        """Save index to disk"""
+        data = {
+            'index': {str(k): v for k, v in self.index.items()},
+            'metadata': self.doc_metadata
+        }
+        with open(path, 'w') as f:
+            json.dump(data, f)
+
+    @classmethod
+    def load(cls, path: str):
+        with open(path, 'r') as f:
+            data = json.load(f)
+        idx = cls()
+        idx.index = {int(k): v for k, v in data['index'].items()}
+        idx.doc_metadata = data['metadata']
+        return idx
+```
+
+### 6.4 Retrieval with Inverted Index
+
+```python
+import heapq
+from typing import List, Tuple
+
+class SPLADERetriever:
+    def __init__(self, index: SPLADEIndex, encoder: SPLADEEncoder,
+                 tokenizer):
+        self.index = index
+        self.encoder = encoder
+        self.tokenizer = tokenizer
+
+    def retrieve(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        # Encode query
+        query_vec = self.encoder.encode_queries([query])[0]
+
+        # Candidate generation via inverted index
+        candidate_scores = defaultdict(float)
+
+        for token_id, q_weight in query_vec.items():
+            if token_id in self.index.index:
+                for doc_id, d_weight in self.index.index[token_id]:
+                    candidate_scores[doc_id] += q_weight * d_weight
+
+        # Top-k retrieval
+        top_docs = heapq.nlargest(top_k, candidate_scores.items(),
+                                  key=lambda x: x[1])
+        return top_docs
+
+    def batch_retrieve(self, queries: List[str], top_k: int = 10
+                      ) -> List[List[Tuple[str, float]]]:
+        query_vecs = self.encoder.encode_queries(queries)
+        results = []
+        for query_vec in query_vecs:
+            candidate_scores = defaultdict(float)
+            for token_id, q_weight in query_vec.items():
+                if token_id in self.index.index:
+                    for doc_id, d_weight in self.index.index[token_id]:
+                        candidate_scores[doc_id] += q_weight * d_weight
+            top_docs = heapq.nlargest(top_k, candidate_scores.items(),
+                                      key=lambda x: x[1])
+            results.append(top_docs)
+        return results
+```
+
+---
+
+## 7. Integration with RAG Systems
+
+### 7.1 Complete RAG Pipeline with SPLADE
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SPLADE-RAG Pipeline                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  User Query                                                     │
+│       │                                                         │
+│       ▼                                                         │
+│  ┌─────────────┐    Sparse Vector    ┌─────────────────────┐   │
+│  │ SPLADE      │ ──────────────────► │ Inverted Index      │   │
+│  │ Encoder     │                     │ (Elasticsearch/     │   │
+│  └─────────────┘                     │  Custom)            │   │
+│                                      └─────────┬───────────┘   │
+│                                                │               │
+│                                                ▼               │
+│                                      ┌─────────────────────┐   │
+│                                      │ Top-k Documents     │   │
+│                                      │ (with scores)       │   │
+│                                      └─────────┬───────────┘   │
+│                                                │               │
+│                                                ▼               │
+│                                      ┌─────────────────────┐   │
+│                                      │ Re-ranker (Optional)│   │
+│                                      │ (Cross-encoder/     │   │
+│                                      │  ColBERT)           │   │
+│                                      └─────────┬───────────┘   │
+│                                                │               │
+│                                                ▼               │
+│                                      ┌─────────────────────┐   │
+│                                      │ Context Assembly    │   │
+│                                      │ (Chunking,          │   │
+│                                      │  deduplication)     │   │
+│                                      └─────────┬───────────┘   │
+│                                                │               │
+│                                                ▼               │
+│                                      ┌─────────────────────┐   │
+│                                      │ LLM Generator       │   │
+│                                      │ (with citations)    │   │
+│                                      └─────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Elasticsearch Integration
+
+```json
+// Index mapping for SPLADE vectors
+{
+  "mappings": {
+    "properties": {
+      "content": { "type": "text" },
+      "splade_vector": {
+        "type": "rank_features"
+      },
+      "metadata": { "type": "object" }
+    }
+  }
+}
+```
+
+```python
+from elasticsearch import Elasticsearch
+
+class ElasticsearchSPLADEIndex:
+    def __init__(self, es_url='http://localhost:9200',
+                 index_name='splade_rag'):
+        self.es = Elasticsearch([es_url])
+        self.index_name = index_name
+        self._create_index()
+
+    def _create_index(self):
+        mapping = {
+            "mappings": {
+                "properties": {
+                    "content": {"type": "text"},
+                    "splade_vector": {"type": "rank_features"},
+                    "metadata": {"type": "object"}
+                }
+            }
+        }
+        if not self.es.indices.exists(index=self.index_name):
+            self.es.indices.create(index=self.index_name, body=mapping)
+
+    def add_documents(self, docs: List[Dict]):
+        """docs = [{'id': ..., 'content': ..., 'splade_vec': {...}, 'metadata': ...}]"""
+        actions = []
+        for doc in docs:
+            # Convert sparse dict to rank_features format
+            rank_features = {
+                str(token_id): weight
+                for token_id, weight in doc['splade_vec'].items()
+            }
+            actions.append({
+                "_index": self.index_name,
+                "_id": doc['id'],
+                "_source": {
+                    "content": doc['content'],
+                    "splade_vector": rank_features,
+                    "metadata": doc.get('metadata', {})
+                }
+            })
+        from elasticsearch.helpers import bulk
+        bulk(self.es, actions)
+
+    def search(self, query_vec: Dict[int, float], top_k: int = 10):
+        # Build rank_feature query
+        should_clauses = []
+        for token_id, weight in query_vec.items():
+            should_clauses.append({
+                "rank_feature": {
+                    "field": f"splade_vector.{token_id}",
+                    "saturation": {
+                        "pivot": 1.0
+                    },
+                    "boost": weight
+                }
+            })
+
+        query = {
+            "size": top_k,
+            "query": {
+                "bool": {"should": should_clauses, "minimum_should_match": 1}
+            }
+        }
+        return self.es.search(index=self.index_name, body=query)
+```
+
+### 7.3 Hybrid Retrieval (SPLADE + Dense)
+
+```python
+class HybridRetriever:
+    def __init__(self, splade_retriever, dense_retriever,
+                 alpha: float = 0.5, fusion: str = 'rrf'):
+        self.splade = splade_retriever
+        self.dense = dense_retriever
+        self.alpha = alpha  # Weight for score combination
+        self.fusion = fusion  # 'rrf', 'weighted', 'linear'
+
+    def retrieve(self, query: str, top_k: int = 10) -> List[Tuple[str, float]]:
+        # Get results from both retrievers
+        splade_results = self.splade.retrieve(query, top_k * 2)
+        dense_results = self.dense.retrieve(query, top_k * 2)
+
+        if self.fusion == 'rrf':
+            return self._rrf_fusion(splade_results, dense_results, top_k)
+        elif self.fusion == 'weighted':
+            return self._weighted_fusion(splade_results, dense_results, top_k)
+        else:
+            return self._linear_fusion(splade_results, dense_results, top_k)
+
+    def _rrf_fusion(self, results1, results2, top_k, k=60):
+        """Reciprocal Rank Fusion"""
+        scores = defaultdict(float)
+        for rank, (doc_id, _) in enumerate(results1):
+            scores[doc_id] += 1 / (k + rank + 1)
+        for rank, (doc_id, _) in enumerate(results2):
+            scores[doc_id] += 1 / (k + rank + 1)
+        return heapq.nlargest(top_k, scores.items(), key=lambda x: x[1])
+```
+
+### 7.4 RAG Application Example
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+class SPLADERAG:
+    def __init__(self,
+                 splade_model_path: str,
+                 llm_model_name: str = 'microsoft/Phi-3-mini-4k-instruct',
+                 index_path: str = None,
+                 device: str = 'cuda'):
+
+        # SPLADE components
+        self.encoder = SPLADEEncoder(splade_model_path, device=device)
+        self.index = SPLADEIndex.load(index_path) if index_path else SPLADEIndex()
+        self.retriever = SPLADERetriever(self.index, self.encoder,
+                                         self.encoder.tokenizer)
+
+        # LLM for generation
+        self.llm_tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            llm_model_name,
+            torch_dtype=torch.float16,
+            device_map='auto'
+        )
+
+    def answer(self, question: str, top_k: int = 5,
+               max_new_tokens: int = 512) -> Dict:
+        # Retrieve
+        retrieved = self.retriever.retrieve(question, top_k=top_k)
+
+        # Build context
+        context_parts = []
+        citations = []
+        for i, (doc_id, score) in enumerate(retrieved):
+            meta = self.index.doc_metadata.get(doc_id, {})
+            content = meta.get('content', '')
+            context_parts.append(f"[Doc {i+1}] {content}")
+            citations.append({
+                'doc_id': doc_id,
+                'score': score,
+                'metadata': meta
+            })
+
+        context = "\n\n".join(context_parts)
+
+        # Generate answer
+        prompt = f"""Answer the question based on the provided context.
+
+Context:
+{context}
+
+Question: {question}
+
+Answer:"""
+
+        inputs = self.llm_tokenizer(prompt, return_tensors='pt').to(self.llm.device)
+        with torch.no_grad():
+            outputs = self.llm.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=0.3,
+                do_sample=True,
+                top_p=0.9
+            )
+
+        answer = self.llm_tokenizer.decode(
+            outputs[0][inputs['input_ids'].shape[1]:],
+            skip_special_tokens=True
+        )
+
+        return {
+            'answer': answer.strip(),
+            'citations': citations,
+            'context_used': len(context_parts)
+        }
+```
+
+---
+
+## 8. Performance Benchmarks
+
+### 8.1 MS MARCO Passage Ranking (Dev Set)
+
+| Model | MRR@10 | nDCG@10 | Recall@100 | Index Size | Query Latency |
+|-------|--------|---------|------------|------------|---------------|
+| BM25 | 0.187 | 0.259 | 0.731 | 1.2 GB | ~5 ms |
+| DPR | 0.326 | 0.398 | 0.887 | 4.5 GB | ~50 ms |
+| ANCE | 0.330 | 0.404 | 0.892 | 4.5 GB | ~50 ms |
+| ColBERTv2 | 0.397 | 0.473 | 0.938 | 12 GB | ~150 ms |
+| **SPLADE v1** | 0.368 | 0.442 | 0.923 | **0.8 GB** | **~15 ms** |
+| **SPLADE v2 (max)** | **0.379** | **0.453** | **0.931** | **0.9 GB** | **~12 ms** |
+| SPLADE-distil | 0.365 | 0.436 | 0.918 | 0.7 GB | ~8 ms |
+| SPLADE-ensemble | 0.387 | 0.461 | 0.935 | 2.5 GB | ~35 ms |
+
+### 8.2 BEIR Benchmark (Zero-shot)
+
+| Dataset | BM25 | SPLADE v2 | Contriever | GTR |
+|---------|------|-----------|------------|-----|
+| TREC-COVID | 0.656 | **0.742** | 0.689 | 0.712 |
+| NFCorpus | 0.325 | **0.372** | 0.341 | 0.358 |
+| FiQA | 0.236 | **0.328** | 0.298 | 0.312 |
+| ArguAna | 0.315 | 0.402 | **0.448** | 0.421 |
+| SciFact | 0.665 | **0.689** | 0.672 | 0.681 |
+| **Average** | 0.412 | **0.482** | 0.458 | 0.471 |
+
+### 8.3 Efficiency Comparison
+
+| Metric | Dense (HNSW) | SPLADE (Inverted Index) |
+|--------|--------------|-------------------------|
+| **Index Build (1M docs)** | 45 min | 8 min |
+| **Index Size (1M docs)** | 4.5 GB | 0.9 GB |
+| **Memory (1M docs)** | 12 GB | 2 GB |
+| **Query Latency (p99)** | 80 ms | 15 ms |
+| **Throughput (QPS)** | 200 | 2000 |
+| **Scalability** | Limited by RAM | Excellent (disk-based) |
+
+---
+
+## 9. Best Practices
+
+### 9.1 Data Preparation
+
+```python
+def preprocess_for_splade(text: str, max_length: int = 256) -> str:
+    """Optimize text for SPLADE encoding"""
+    # SPLADE works best with:
+    # - Natural language (not keyword lists)
+    # - Complete sentences
+    # - Lowercasing (BERT is uncased)
+    # - Removing excessive punctuation
+
+    import re
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    # Keep sentence structure
+    text = text.strip()
+    # Truncate at sentence boundary if possible
+    if len(text) > max_length * 4:  # rough char estimate
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        truncated = []
+        char_count = 0
+        for sent in sentences:
+            if char_count + len(sent) > max_length * 4:
+                break
+            truncated.append(sent)
+            char_count += len(sent)
+        text = ' '.join(truncated)
+    return text
+```
+
+### 9.2 Chunking Strategy for RAG
+
+```python
+def chunk_for_splade(text: str,
+                     chunk_size: int = 200,  # tokens
+                     overlap: int = 50) -> List[str]:
+    """Optimal chunking for SPLADE"""
+    # SPLADE benefits from:
+    # - Semantic coherence within chunks
+    # - Sufficient context for term expansion
+    # - Not too small (loses expansion power)
+    # - Not too large (dilutes important terms)
+
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+
+    chunks = []
+    for i in range(0, len(tokens), chunk_size - overlap):
+        chunk_tokens = tokens[i:i + chunk_size]
+        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+        if len(chunk_text.strip()) > 20:  # Minimum meaningful length
+            chunks.append(chunk_text)
+    return chunks
+```
+
+### 9.3 Hyperparameter Tuning
+
+| Parameter | Recommended Range | Notes |
+|-----------|-------------------|-------|
+| **λ_q (query FLOPS)** | 0.001 - 0.01 | Lower = more expansion |
+| **λ_d (doc FLOPS)** | 0.01 - 0.1 | Higher = more selective |
+| **Top-k (query)** | 50 - 200 | Keep more for recall |
+| **Top-k (doc)** | 100 - 500 | Documents need more terms |
+| **Temperature (τ)** | 0.5 - 1.0 | For contrastive loss |
+| **Learning Rate** | 1e-5 - 5e-5 | For fine-tuning |
+| **Batch Size** | 16 - 64 | Depends on GPU memory |
+
+### 9.4 Monitoring & Debugging
+
+```python
+def analyze_sparse_vector(vec: Dict[int, float],
+                          tokenizer,
+                          top_n: int = 20) -> Dict:
+    """Analyze what terms SPLADE considers important"""
+    sorted_terms = sorted(vec.items(), key=lambda x: x[1], reverse=True)
+
+    analysis = {
+        'num_terms': len(vec),
+        'total_weight': sum(vec.values()),
+        'top_terms': [
+            {
+                'token': tokenizer.decode([tid]),
+                'token_id': tid,
+                'weight': weight
+            }
+            for tid, weight in sorted_terms[:top_n]
+        ],
+        'weight_distribution': {
+            'max': max(vec.values()),
+            'mean': sum(vec.values()) / len(vec),
+            'min_nonzero': min(vec.values())
+        }
+    }
+    return analysis
+
+# Usage
+analysis = analyze_sparse_vector(query_vec, tokenizer)
+print(f"Query activates {analysis['num_terms']} terms")
+for term in analysis['top_terms']:
+    print(f"  {term['token']:20s} : {term['weight']:.4f}")
+```
+
+---
+
+## 10. Advanced Topics
+
+### 10.1 Query Expansion Analysis
+
+SPLADE's expansion can be inspected:
+
+```python
+def show_expansion(original_query: str, sparse_vec: Dict,
+                   tokenizer, original_tokens: List[int]):
+    """Show which terms were added by SPLADE"""
+    original_set = set(original_tokens)
+    expanded_terms = []
+    for tid, weight in sparse_vec.items():
+        if tid not in original_set and tid not in [0, 101, 102, 103]:
+            expanded_terms.append((tokenizer.decode([tid]), weight))
+
+    expanded_terms.sort(key=lambda x: x[1], reverse=True)
+    print(f"Original: {original_query}")
+    print(f"Expanded terms ({len(expanded_terms)}):")
+    for term, weight in expanded_terms[:15]:
+        print(f"  + {term:20s} ({weight:.4f})")
+```
+
+### 10.2 Distillation from ColBERT
+
+```python
+def distill_colbert_to_splade(colbert_model, splade_model,
+                               dataloader, optimizer, device,
+                               temperature=1.0, alpha=0.5):
+    """Knowledge distillation from ColBERT to SPLADE"""
+    splade_model.train()
+    colbert_model.eval()
+
+    for batch in dataloader:
+        queries, pos_docs, neg_docs = batch
+
+        # ColBERT scores (teacher)
+        with torch.no_grad():
+            t_q = colbert_model.encode_queries(queries)
+            t_pos = colbert_model.encode_docs(pos_docs)
+            t_neg = colbert_model.encode_docs(neg_docs)
+
+            t_scores_pos = colbert_model.score(t_q, t_pos)
+            t_scores_neg = colbert_model.score(t_q, t_neg)
+            t_scores = torch.cat([t_scores_pos, t_scores_neg], dim=1)
+            t_probs = torch.softmax(t_scores / temperature, dim=1)
+
+        # SPLADE scores (student)
+        s_q = splade_model.encode_queries(queries)
+        s_pos = splade_model.encode_docs(pos_docs)
+        s_neg = splade_model.encode_docs(neg_docs)
+
+        s_scores_pos = (s_q * s_pos).sum(dim=1)
+        s_scores_neg = (s_q.unsqueeze(1) * s_neg).sum(dim=2)
+        s_scores = torch.cat([s_scores_pos.unsqueeze(1), s_scores_neg], dim=1)
+        s_log_probs = torch.log_softmax(s_scores / temperature, dim=1)
+
+        # KL divergence loss
+        kl_loss = torch.nn.functional.kl_div(s_log_probs, t_probs,
+                                              reduction='batchmean')
+
+        # SPLADE's own contrastive loss
+        contrastive_loss = splade_model.contrastive_loss(s_q, s_pos, s_neg)
+
+        # Sparsity loss
+        sparsity_loss = splade_model.flops_loss(s_q, s_pos)
+
+        # Combined loss
+        loss = alpha * contrastive_loss + (1-alpha) * kl_loss * temperature**2 + sparsity_loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+```
+
+### 10.3 Quantization for Production
+
+```python
+def quantize_splade_vectors(sparse_vecs: List[Dict[int, float]],
+                            bits: int = 8) -> List[Dict[int, int]]:
+    """Quantize weights to reduce storage"""
+    # Find global max for normalization
+    all_weights = [w for vec in sparse_vecs for w in vec.values()]
+    max_weight = max(all_weights)
+
+    scale = (2**bits - 1) / max_weight
+
+    quantized = []
+    for vec in sparse_vecs:
+        q_vec = {}
+        for tid, weight in vec.items():
+            q_weight = int(round(weight * scale))
+            if q_weight > 0:
+                q_vec[tid] = q_weight
+        quantized.append(q_vec)
+
+    return quantized, scale
+
+# Dequantize at query time
+def dequantize(query_vec, scale):
+    return {tid: w/scale for tid, w in query_vec.items()}
+```
+
+### 10.4 Incremental Indexing
+
+```python
+class IncrementalSPLADEIndex(SPLADEIndex):
+    def add_single_document(self, doc_id: str, content: str,
+                            encoder: SPLADEEncoder, metadata: Dict = None):
+        """Add a single document without rebuilding"""
+        sparse_vec = encoder.encode_documents([content])[0]
+
+        # Remove if exists (update case)
+        if doc_id in self.doc_metadata:
+            self._remove_doc(doc_id)
+
+        # Add new
+        self.doc_metadata[doc_id] = metadata or {}
+        self.doc_metadata[doc_id]['content'] = content
+
+        for token_id, weight in sparse_vec.items():
+            self.index[token_id].append((doc_id, weight))
+
+    def _remove_doc(self, doc_id: str):
+        """Remove document from index"""
+        # Mark as deleted (lazy deletion)
+        if doc_id in self.doc_metadata:
+            self.doc_metadata[doc_id]['_deleted'] = True
+
+    def compact(self):
+        """Rebuild index removing deleted docs"""
+        new_index = defaultdict(list)
+        for token_id, postings in self.index.items():
+            for doc_id, weight in postings:
+                if not self.doc_metadata.get(doc_id, {}).get('_deleted', False):
+                    new_index[token_id].append((doc_id, weight))
+        self.index = new_index
+        # Clean metadata
+        self.doc_metadata = {k: v for k, v in self.doc_metadata.items()
+                            if not v.get('_deleted', False)}
+```
+
+---
+
+## 11. References
+
+### 11.1 Primary Papers
+
+1. **SPLADE v1**: Formal, T., Lassance, C., Piwowarski, B., & Clinchant, S. (2021). *SPLADE: Sparse Lexical and Expansion Model for First Stage Ranking*. SIGIR 2021.
+
+2. **SPLADE v2**: Formal, T., Lassance, C., Piwowarski, B., & Clinchant, S. (2021). *SPLADE v2: Sparse Lexical and Expansion Model for Information Retrieval*. arXiv:2109.10086.
+
+3. **Distillation**: Formal, T., et al. (2022). *From Distillation to Hard Negative Sampling: Making Sparse Neural IR Models More Effective*. arXiv:2205.04733.
+
+### 11.2 Key Resources
+
+| Resource | Link |
+|----------|------|
+| **Official Repository** | https://github.com/naver/splade |
+| **Hugging Face Models** | https://huggingface.co/models?search=splade |
+| **SPLADE-distil** | https://huggingface.co/naver/splade-distil |
+| **SPLADE-max** | https://huggingface.co/naver/splade-max |
+| **Pyserini Integration** | https://github.com/castorini/pyserini |
+
+### 11.3 Pre-trained Models
+
+```python
+# Available on Hugging Face Hub
+MODELS = {
+    'splade-max': 'naver/splade-max',           # Best quality
+    'splade-distil': 'naver/splade-distil',     # Fast, good quality
+    'splade-cocondenser': 'naver/splade-cocondenser',  # CoCondenser init
+    'splade-multilingual': 'naver/multi-splade',  # 100+ languages
+}
+```
+
+### 11.4 Datasets for Training/Evaluation
+
+| Dataset | Size | Use Case |
+|---------|------|----------|
+| **MS MARCO Passage** | 8.8M passages | Training, benchmarking |
+| **MS MARCO Document** | 3.2M docs | Document-level retrieval |
+| **TREC Deep Learning** | 43/200 queries | Evaluation |
+| **BEIR** | 18 datasets | Zero-shot evaluation |
+| **LoTTE** | 12 domains | Long-tail evaluation |
+
+---
+
+## Appendix A: Quick Start Checklist
+
+- [ ] Choose model variant (splade-max recommended)
+- [ ] Prepare corpus with proper chunking (200 tokens, 50 overlap)
+- [ ] Encode all documents with SPLADE (batch_size=16, top_k=300)
+- [ ] Build inverted index (custom or Elasticsearch)
+- [ ] Encode queries at runtime (top_k=100)
+- [ ] Retrieve via inverted index lookup
+- [ ] Optional: Re-rank with cross-encoder
+- [ ] Feed to LLM with citations
+- [ ] Monitor sparsity statistics (terms per query/doc)
+- [ ] Tune FLOPS regularization if needed
+
+---
+
+## Appendix B: Common Issues & Solutions
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| **Too many terms per query** | λ_q too low | Increase query FLOPS weight |
+| **Poor recall** | λ_d too high / top_k too low | Decrease doc FLOPS, increase top_k |
+| **Slow indexing** | Large batch size / no batching | Use batch_size=16-32, parallelize |
+| **OOM during encoding** | Long sequences / large batch | Reduce max_length, batch_size |
+| **Quality drop after quantization** | Too aggressive quantization | Use 8-bit instead of 4-bit |
+| **Expansion adds noise** | Model not fine-tuned for domain | Fine-tune on domain data |
+
+---
+
+*Document Version: 1.0*
+*Last Updated: 2024*
+*For SPLADE RAG Project Reference*

@@ -1,0 +1,37 @@
+Dense vs Sparse Retrieval: A Comprehensive Comparison
+
+Information retrieval systems can be broadly categorized into sparse and dense retrieval methods.
+
+Sparse Retrieval (Traditional):
+- TF-IDF, BM25: Term frequency-inverse document frequency weighting
+- Vectors: High-dimensional (vocabulary size), mostly zeros
+- Indexing: Inverted index - exact match, very fast
+- Interpretability: High - each dimension is a word
+- Limitations: Vocabulary mismatch problem (synonyms, polysemy)
+
+Dense Retrieval (Neural):
+- DPR, ANCE, Contriever: Transformer-based encoders
+- Vectors: Low-dimensional (768-1024), dense
+- Indexing: Approximate Nearest Neighbor (HNSW, IVF)
+- Interpretability: Low - dimensions are latent
+- Strengths: Semantic matching, handles synonyms
+
+SPLADE: Best of Both Worlds
+SPLADE combines advantages of both approaches:
+- Sparse vectors like traditional methods (inverted index compatible)
+- Neural semantic understanding like dense methods
+- Learned term expansion addresses vocabulary mismatch
+- Interpretable: can inspect which terms are activated
+
+Hybrid Retrieval:
+Many production systems combine sparse and dense:
+1. Reciprocal Rank Fusion (RRF): Combines rankings
+2. Score interpolation: Weighted combination of normalized scores
+3. Cascade: Sparse first-stage, dense re-ranking
+4. SPLADE + ColBERT: Sparse retrieval + late interaction re-ranking
+
+When to Use Each:
+- BM25: Strong keyword requirements, no GPU, simple deployment
+- Dense: Semantic search, recommendation, cross-lingual
+- SPLADE: Best sparse quality, interpretability needed, CPU deployment
+- Hybrid: Maximum quality, can afford complexity

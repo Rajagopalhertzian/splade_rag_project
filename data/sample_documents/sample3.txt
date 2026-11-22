@@ -1,0 +1,43 @@
+RAG Systems: Retrieval-Augmented Generation Best Practices
+
+Retrieval-Augmented Generation (RAG) combines information retrieval with large language models to produce grounded, citation-backed answers.
+
+Core Components:
+1. Document Processing: Chunking, embedding, indexing
+2. Retrieval: Finding relevant passages for a query
+3. Generation: LLM produces answer conditioned on retrieved context
+4. Evaluation: Measuring retrieval and generation quality
+
+Chunking Strategies:
+- Fixed-size: Simple, but may split semantic units
+- Sentence-aware: Preserves coherence, better for SPLADE
+- Semantic: Uses embedding similarity to find boundaries
+- Hierarchical: Multiple granularities for different query types
+
+For SPLADE specifically:
+- Optimal chunk size: 150-250 tokens
+- Overlap: 50 tokens for context continuity
+- Sentence boundaries preferred over token boundaries
+
+Retrieval Quality:
+- First-stage recall is critical (aim for >90% @100)
+- Re-ranking with cross-encoder adds 5-10% nDCG
+- Hybrid sparse+dense often outperforms either alone
+- Query expansion (SPLADE's strength) improves recall
+
+Generation Best Practices:
+- Include citations in prompt: [Source 1], [Source 2]
+- Limit context to fit model window (leave room for answer)
+- Temperature: 0.1-0.3 for factual QA
+- Instruct model to say "I don't know" if context insufficient
+
+Evaluation Metrics:
+Retrieval: Recall@k, MRR@k, nDCG@k
+Generation: Faithfulness, Answer Relevance, Citation Accuracy
+End-to-end: Human preference, Factual correctness
+
+Common Pitfalls:
+- Chunking too small (loses context) or too large (dilutes relevance)
+- Not re-ranking (misses 10-20% quality)
+- Ignoring citation accuracy (hallucinated sources)
+- Single retrieval strategy (hybrid is more robust)

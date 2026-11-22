@@ -1,0 +1,28 @@
+SPLADE: Sparse Lexical and Expansion Model for Information Retrieval
+
+SPLADE (Sparse Lexical and Expansion Model) is a family of sparse neural retrieval models that learn sparse vocabulary-based representations for both queries and documents. Unlike dense retrieval models that produce dense vectors, SPLADE produces sparse high-dimensional vectors where each dimension corresponds to a token in the vocabulary.
+
+Key Innovations:
+1. Learned Sparsity: The model learns which vocabulary terms are important, rather than using fixed TF-IDF weights.
+2. Term Expansion: Automatically expands queries/documents with relevant terms not present in original text.
+3. Interpretability: Non-zero weights directly correspond to vocabulary terms - human readable.
+4. Efficiency: Sparse vectors enable inverted index lookup - sub-linear retrieval time.
+5. Compatibility: Works with existing search infrastructure (Elasticsearch, Lucene, etc.).
+
+Architecture:
+SPLADE uses a BERT backbone with an MLM (Masked Language Modeling) head to produce vocabulary logits for each token position. A ReLU activation ensures non-negativity (required for inverted index compatibility). Max-pooling (SPLADE-max) or sum-pooling aggregates token-level weights into document-level sparse vectors.
+
+Training:
+Training uses contrastive learning with FLOPS regularization to control sparsity. The FLOPS regularizer encourages the model to use fewer but more important terms:
+- Query FLOPS: λ_q × (Σ_j w_{q,j})^2
+- Document FLOPS: λ_d × Σ_j w_{d,j}^2
+
+Knowledge distillation from dense teachers like ColBERT further improves quality.
+
+Performance:
+On MS MARCO Passage Ranking:
+- SPLADE v2 (max): MRR@10 = 0.379, nDCG@10 = 0.453
+- Index size: ~0.9 GB for 8.8M passages
+- Query latency: ~12ms
+
+On BEIR Zero-shot benchmark, SPLADE v2 outperforms BM25 and dense retrievers on most datasets.

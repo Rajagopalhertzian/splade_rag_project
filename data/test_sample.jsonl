@@ -1,0 +1,10 @@
+{"query": "What is SPLADE?", "relevant_docs": ["sample1"]}
+{"query": "How does SPLADE differ from BM25?", "relevant_docs": ["sample1", "sample2"]}
+{"query": "What are the key innovations of SPLADE?", "relevant_docs": ["sample1"]}
+{"query": "When should I use dense vs sparse retrieval?", "relevant_docs": ["sample2"]}
+{"query": "What is the architecture of SPLADE?", "relevant_docs": ["sample1"]}
+{"query": "How does SPLADE perform term expansion?", "relevant_docs": ["sample1"]}
+{"query": "What are best practices for RAG chunking?", "relevant_docs": ["sample3"]}
+{"query": "How to evaluate RAG systems?", "relevant_docs": ["sample3"]}
+{"query": "What is hybrid retrieval?", "relevant_docs": ["sample2"]}
+{"query": "What is FLOPS regularization in SPLADE?", "relevant_docs": ["sample1"]}
